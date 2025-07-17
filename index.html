@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>3D Shapes Shooting + Settings</title>
+    <style>
+      body, html {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background-color: #000;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+        position: relative;
+      }
+      /* Basic styling for the control panel at the bottom */
+      .control-panel {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 100%;
+        padding: 10px;
+        background-color: rgba(0,0,0,0.5);
+        color: #fff;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        font-family: sans-serif;
+      }
+      .control-panel label {
+        margin: 0 5px;
+      }
+      .checkbox-group {
+        margin: 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- React + ReactDOM -->
+    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+
+    <!-- Three.js + OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script type="text/javascript">
+      class ShootingShapesWithUI extends React.Component {
+        constructor(props) {
+          super(props);
+          this.mountRef = React.createRef();
+
+          // React state for user-adjustable settings.
+          // Instead of a single shapeType, we now have allowedShapes checkboxes.
+          this.state = {
+            allowedShapes: {
+              torusKnot: true,
+              sphere: true,
+              icosahedron: true,
+              cube: true
+            },
+            shapeSize: 5,     // geometry size
+            shiftSpeed: 0.5   // pulsing speed
+          };
+
+          // THREE.js objects.
+          this.scene = null;
+          this.camera = null;
+          this.renderer = null;
+          this.controls = null;
+
+          // Arrays to hold shapes, shards, and lasers.
+          this.shapes = [];
+          this.shards = [];
+          this.lasers = [];
+
+          // Lights.
+          this.pointLights = [];
+
+          // For time-based animation.
+          this.clock = new THREE.Clock();
+
+          // For shooting.
+          this.raycaster = new THREE.Raycaster();
+          this.mouse = new THREE.Vector2();
+
+          // Maximum number of shapes to maintain.
+          this.maxShapes = 30;
+
+          // For keyboard movement.
+          this.keys = {};
+        }
+
+        componentDidMount() {
+          this.initThree();
+          this.spawnInitialShapes();
+          this.createLights();
+          this.animate();
+
+          window.addEventListener('resize', this.onWindowResize);
+          // Listen for click to shoot laser.
+          this.renderer.domElement.addEventListener('click', this.onClickShoot);
+          window.addEventListener('keydown', this.onKeyDown);
+          window.addEventListener('keyup', this.onKeyUp);
+        }
+
+        componentWillUnmount() {
+          window.removeEventListener('resize', this.onWindowResize);
+          if (this.renderer) {
+            this.renderer.domElement.removeEventListener('click', this.onClickShoot);
+          }
+          window.removeEventListener('keydown', this.onKeyDown);
+          window.removeEventListener('keyup', this.onKeyUp);
+        }
+
+        // --- THREE.js Setup ---
+        initThree = () => {
+          this.scene = new THREE.Scene();
+
+          const width = this.mountRef.current.clientWidth;
+          const height = this.mountRef.current.clientHeight;
+          this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
+          this.camera.position.set(0, 0, 60);
+
+          this.renderer = new THREE.WebGLRenderer({ antialias: true });
+          this.renderer.setSize(width, height);
+          this.mountRef.current.appendChild(this.renderer.domElement);
+
+          // OrbitControls for rotation only.
+          this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+          this.controls.enableDamping = true;
+          this.controls.dampingFactor = 0.05;
+          this.controls.enableZoom = false;
+          this.controls.enablePan = false;
+        };
+
+        // --- Spawn the initial shapes ---
+        spawnInitialShapes = () => {
+          for (let i = 0; i < this.maxShapes; i++) {
+            this.spawnShape();
+          }
+        };
+
+        // --- Create moving lights ---
+        createLights = () => {
+          const numLights = 3;
+          for (let i = 0; i < numLights; i++) {
+            const color = new THREE.Color().setHSL(Math.random(), 1, 0.5);
+            const pointLight = new THREE.PointLight(color, 1.5, 200);
+            pointLight.position.set(0, 0, 0);
+            this.scene.add(pointLight);
+
+            this.pointLights.push({
+              light: pointLight,
+              speed: 0.5 + Math.random() * 0.5,
+              radius: 40 + Math.random() * 20,
+              angleOffset: Math.random() * Math.PI * 2
+            });
+          }
+          // Ambient light.
+          const ambient = new THREE.AmbientLight(0xffffff, 0.2);
+          this.scene.add(ambient);
+        };
+
+        // --- Main animation loop ---
+        animate = () => {
+          requestAnimationFrame(this.animate);
+          const delta = this.clock.getDelta();
+          const elapsed = this.clock.getElapsedTime();
+
+          // --- Update Camera Movement via Arrow Keys ---
+          const moveSpeed = 20 * delta;
+          let moveVector = new THREE.Vector3();
+          if (this.keys['ArrowUp']) {
+            moveVector.z -= moveSpeed;
+          }
+          if (this.keys['ArrowDown']) {
+            moveVector.z += moveSpeed;
+          }
+          if (this.keys['ArrowLeft']) {
+            moveVector.x -= moveSpeed;
+          }
+          if (this.keys['ArrowRight']) {
+            moveVector.x += moveSpeed;
+          }
+          this.camera.position.add(moveVector);
+          this.controls.target.add(moveVector);
+
+          // --- Update Orbiting Shapes ---
+          this.shapes.forEach((obj) => {
+            // Update orbit angle.
+            obj.orbitAngle += obj.orbitSpeed * delta;
+            // Compute new position relative to camera.
+            obj.mesh.position.set(
+              this.camera.position.x + obj.orbitRadius * Math.cos(obj.orbitAngle),
+              this.camera.position.y + obj.verticalOffset,
+              this.camera.position.z + obj.orbitRadius * Math.sin(obj.orbitAngle)
+            );
+            // Also apply rotation and pulsing.
+            obj.mesh.rotation.x += obj.rotationSpeed.x;
+            obj.mesh.rotation.y += obj.rotationSpeed.y;
+            const scaleFactor = obj.baseScale + 0.3 * Math.sin(obj.scaleSpeed * elapsed + obj.offsetTime);
+            obj.mesh.scale.set(scaleFactor, scaleFactor, scaleFactor);
+          });
+
+          // --- Update Shards ---
+          for (let i = this.shards.length - 1; i >= 0; i--) {
+            const shard = this.shards[i];
+            shard.mesh.position.add(shard.velocity);
+            shard.velocity.y -= 0.001;
+            shard.lifetime -= 0.01;
+            if (shard.lifetime <= 0) {
+              this.scene.remove(shard.mesh);
+              this.shards.splice(i, 1);
+            }
+          }
+
+          // --- Update Lasers ---
+          for (let i = this.lasers.length - 1; i >= 0; i--) {
+            const laser = this.lasers[i];
+            // Move laser along its velocity.
+            laser.mesh.position.add(laser.velocity.clone().multiplyScalar(delta));
+            // Remove if too far from camera.
+            if (laser.mesh.position.distanceTo(this.camera.position) > 100) {
+              this.scene.remove(laser.mesh);
+              this.lasers.splice(i, 1);
+              continue;
+            }
+            // Check for collision with shapes.
+            for (let j = 0; j < this.shapes.length; j++) {
+              const shapeObj = this.shapes[j];
+              const dist = laser.mesh.position.distanceTo(shapeObj.mesh.position);
+              // Use shape size as approximate collision threshold.
+              if (dist < this.state.shapeSize * 1.2) {
+                this.breakShape(shapeObj);
+                // Remove the laser.
+                this.scene.remove(laser.mesh);
+                this.lasers.splice(i, 1);
+                break;
+              }
+            }
+          }
+
+          // --- Update Lights ---
+          this.pointLights.forEach((pl) => {
+            const angle = elapsed * pl.speed + pl.angleOffset;
+            pl.light.position.x = pl.radius * Math.cos(angle);
+            pl.light.position.z = pl.radius * Math.sin(angle);
+            pl.light.position.y = 10 * Math.sin(angle * 0.5);
+          });
+
+          this.controls.update();
+          this.renderer.render(this.scene, this.camera);
+        };
+
+        // --- Window Resize Handler ---
+        onWindowResize = () => {
+          if (!this.mountRef.current) return;
+          const width = this.mountRef.current.clientWidth;
+          const height = this.mountRef.current.clientHeight;
+          this.camera.aspect = width / height;
+          this.camera.updateProjectionMatrix();
+          this.renderer.setSize(width, height);
+        };
+
+        // --- Keyboard Handlers for Arrow Keys ---
+        onKeyDown = (event) => {
+          this.keys[event.key] = true;
+        };
+
+        onKeyUp = (event) => {
+          this.keys[event.key] = false;
+        };
+
+        // --- Laser Shooting from Camera Center ---
+        onClickShoot = (event) => {
+          // Get mouse position in normalized device coordinates.
+          const rect = this.renderer.domElement.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          this.mouse.set(x, y);
+
+          // Convert mouse position to a point in 3D space.
+          const mouseVector = new THREE.Vector3(this.mouse.x, this.mouse.y, 0.5);
+          mouseVector.unproject(this.camera);
+          const direction = mouseVector.sub(this.camera.position).normalize();
+
+          // Create a laser (a small red sphere).
+          const laserGeom = new THREE.SphereGeometry(0.5, 8, 8);
+          const laserMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+          const laserMesh = new THREE.Mesh(laserGeom, laserMat);
+          laserMesh.position.copy(this.camera.position);
+
+          // Laser speed.
+          const speed = 50;
+          const velocity = direction.multiplyScalar(speed);
+
+          // Store the laser.
+          this.lasers.push({ mesh: laserMesh, velocity: velocity });
+          this.scene.add(laserMesh);
+        };
+
+        // --- Break a shape into shards and spawn a new one ---
+        breakShape = (shapeObj) => {
+          const index = this.shapes.indexOf(shapeObj);
+          if (index !== -1) this.shapes.splice(index, 1);
+          this.scene.remove(shapeObj.mesh);
+
+          // Create shards.
+          const shardCount = 10;
+          const pos = shapeObj.mesh.position.clone();
+          for (let i = 0; i < shardCount; i++) {
+            const shardGeom = new THREE.SphereGeometry(0.5, 8, 8);
+            const shardMat = new THREE.MeshStandardMaterial({
+              color: shapeObj.mesh.material.color,
+              metalness: 0.3,
+              roughness: 0.7
+            });
+            const shardMesh = new THREE.Mesh(shardGeom, shardMat);
+            shardMesh.position.copy(pos);
+
+            const velocity = new THREE.Vector3(
+              (Math.random() - 0.5) * 0.5,
+              (Math.random() - 0.5) * 0.5,
+              (Math.random() - 0.5) * 0.5
+            );
+            const shardData = {
+              mesh: shardMesh,
+              velocity: velocity,
+              lifetime: 5.0
+            };
+            this.shards.push(shardData);
+            this.scene.add(shardMesh);
+          }
+
+          // Spawn a new shape to keep total at 30.
+          this.spawnShape();
+        };
+
+        // --- Spawn a single shape using allowed types and orbit parameters ---
+        spawnShape = () => {
+          // Get allowed shape types from state.
+          const allowed = [];
+          for (let key in this.state.allowedShapes) {
+            if (this.state.allowedShapes[key]) {
+              allowed.push(key);
+            }
+          }
+          // Default to 'sphere' if none selected.
+          const shapeType = allowed.length > 0 ? allowed[Math.floor(Math.random() * allowed.length)] : 'sphere';
+          let geometry;
+          if (shapeType === 'torusKnot') {
+            geometry = new THREE.TorusKnotGeometry(this.state.shapeSize, 1.5, 150, 16);
+          } else if (shapeType === 'sphere') {
+            geometry = new THREE.SphereGeometry(this.state.shapeSize, 32, 32);
+          } else if (shapeType === 'icosahedron') {
+            geometry = new THREE.IcosahedronGeometry(this.state.shapeSize, 1);
+          } else if (shapeType === 'cube') {
+            geometry = new THREE.BoxGeometry(this.state.shapeSize, this.state.shapeSize, this.state.shapeSize);
+          } else {
+            geometry = new THREE.SphereGeometry(this.state.shapeSize, 32, 32);
+          }
+
+          const color = new THREE.Color().setHSL(Math.random(), 1, 0.5);
+          const material = new THREE.MeshStandardMaterial({
+            color: color,
+            metalness: 0.3,
+            roughness: 0.5
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+
+          // Instead of random world position, set orbit parameters so it circles around the camera.
+          const orbitRadius = 20 + Math.random() * 20;
+          const orbitAngle = Math.random() * Math.PI * 2;
+          const orbitSpeed = 0.1 + Math.random() * 0.4;  // radians per second
+          const verticalOffset = -10 + Math.random() * 20;
+
+          // Set an initial position relative to camera.
+          mesh.position.set(
+            this.camera.position.x + orbitRadius * Math.cos(orbitAngle),
+            this.camera.position.y + verticalOffset,
+            this.camera.position.z + orbitRadius * Math.sin(orbitAngle)
+          );
+
+          // Random rotation speeds.
+          const rotSpeed = {
+            x: 0.01 + Math.random() * 0.02,
+            y: 0.01 + Math.random() * 0.02
+          };
+
+          const shapeObj = {
+            mesh,
+            rotationSpeed: rotSpeed,
+            baseScale: 1,
+            scaleSpeed: this.state.shiftSpeed,
+            offsetTime: Math.random() * 10,
+            // Orbit parameters:
+            orbitRadius: orbitRadius,
+            orbitAngle: orbitAngle,
+            orbitSpeed: orbitSpeed,
+            verticalOffset: verticalOffset
+          };
+
+          this.shapes.push(shapeObj);
+          this.scene.add(mesh);
+        };
+
+        // --- Render the Three.js canvas and the settings panel ---
+        render() {
+          return React.createElement(
+            'div',
+            { style: { width: '100%', height: '100%', position: 'relative' } },
+            [
+              React.createElement('div', {
+                ref: this.mountRef,
+                style: { width: '100%', height: '100%' }
+              }),
+              React.createElement(
+                'div',
+                { className: 'control-panel' },
+                [
+                  // Allowed shapes checkboxes.
+                  React.createElement('div', { className: 'checkbox-group', key: 'checkboxes' },
+                    Object.keys(this.state.allowedShapes).map((shape) =>
+                      React.createElement('label', { key: shape },
+                        React.createElement('input', {
+                          type: 'checkbox',
+                          checked: this.state.allowedShapes[shape],
+                          onChange: (e) => {
+                            this.setState((prevState) => {
+                              const newAllowed = { ...prevState.allowedShapes };
+                              newAllowed[shape] = e.target.checked;
+                              return { allowedShapes: newAllowed };
+                            });
+                          }
+                        }),
+                        ' ' + shape
+                      )
+                    )
+                  ),
+                  // Size slider.
+                  React.createElement('label', { key: 'size-label' }, 'Size:'),
+                  React.createElement(
+                    'input',
+                    {
+                      type: 'range',
+                      min: 1,
+                      max: 10,
+                      step: 1,
+                      value: this.state.shapeSize,
+                      onChange: (e) => this.setState({ shapeSize: parseFloat(e.target.value) }),
+                      key: 'size-slider'
+                    }
+                  ),
+                  React.createElement('span', { key: 'size-span' }, this.state.shapeSize),
+                  // Shift speed slider.
+                  React.createElement('label', { key: 'shift-label' }, 'Shift Speed:'),
+                  React.createElement(
+                    'input',
+                    {
+                      type: 'range',
+                      min: 0.1,
+                      max: 2,
+                      step: 0.1,
+                      value: this.state.shiftSpeed,
+                      onChange: (e) => this.setState({ shiftSpeed: parseFloat(e.target.value) }),
+                      key: 'shift-slider'
+                    }
+                  ),
+                  React.createElement('span', { key: 'shift-span' }, this.state.shiftSpeed)
+                ]
+              )
+            ]
+          );
+        }
+      }
+
+      // Mount the component.
+      ReactDOM.render(
+        React.createElement(ShootingShapesWithUI),
+        document.getElementById('root')
+      );
+    </script>
+  </body>
+</html>
